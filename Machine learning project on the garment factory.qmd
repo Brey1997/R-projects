@@ -1,0 +1,560 @@
+---
+title: "Preliminary Data Analysis"
+format: docx
+editor: visual
+---
+
+## Quarto
+
+Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+
+## Introduction
+
+This is an R Markdown document for analyzing productivity in the garment industry using predictive analytics.
+
+Load and Preprocess Data
+
+```{r}
+# Load necessary libraries
+library(readr)
+library(caret)
+library(dplyr)
+library(e1071)
+library(summarytools)
+library(corrplot)
+library(car)
+
+# Load dataset
+data <- read_csv("garments_worker_productivity.csv")
+
+
+
+
+```
+
+```{r}
+library(readr)
+library(dplyr)
+
+# Load dataset
+data <- read_csv("garments_worker_productivity.csv")
+
+# Clean department
+data$department <- trimws(data$department)
+data$department[data$department == "sweing"] <- "sewing"
+data$department <- as.factor(data$department)
+
+# ✅ Use case_when() instead of recode
+data$week <- case_when(
+  data$quarter == "Quarter1" ~ "Week 1",
+  data$quarter == "Quarter2" ~ "Week 2",
+  data$quarter == "Quarter3" ~ "Week 3",
+  data$quarter == "Quarter4" ~ "Week 4",
+  data$quarter == "Quarter5" ~ "Week 5",
+  TRUE ~ NA_character_
+)
+
+data$date <- as.Date(data$date, format="%m/%d/%Y")
+data$days_since_start <- as.numeric(data$date - min(data$date))
+
+# Make week an ordered factor
+data$week <- factor(data$week, levels = c("Week 1", "Week 2", "Week 3", "Week 4", "Week 5"))
+
+# Order day correctly
+data$day <- factor(data$day, levels = c("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"))
+
+# Quick check
+table(data$week)
+```
+
+Descriptive Statistics
+
+```{r}
+#| echo: false
+# Summary statistics for all variables
+descr(data)
+
+```
+
+The `echo: false` option disables the printing of code (only output is displayed).
+
+Handle Missing Values (Bagged Tree Imputation)
+
+```{r}
+# View total and per-column missing values
+sum(is.na(data))
+colSums(is.na(data))
+
+# Use caret to apply bagged tree imputation
+preProcModel <- preProcess(data, method = "bagImpute")
+data <- predict(preProcModel, newdata = data)
+
+# Check that all missing values are imputed
+colSums(is.na(data))
+
+# Compare original vs imputed summary of 'wip' (example variable with missing values)
+summary(data$wip)
+summary(data$wip)
+
+```
+
+Distribution and Normality of Actual Productivity
+
+```{r}
+# Histogram of actual productivity
+hist(data$actual_productivity,
+     main = "Distribution of Actual Productivity",
+     xlab = "Actual Productivity", col = "skyblue")
+
+# QQ Plot to assess normality
+qqnorm(data$actual_productivity, main = "Actual Productivity QQ-Plot")
+qqline(data$actual_productivity)
+
+# Skewness value to quantify asymmetry
+skewness(data$actual_productivity, na.rm = TRUE)
+
+```
+
+**Interpretation:**\
+
+A histogram and skewness value show that `actual_productivity` is slightly right-skewed. This implies some high-performing workers affect the tail. If normality is critical for modeling, consider transforming this variable using log or square-root methods.
+
+# Correlation Analysis and ANOVA
+
+```{r}
+# Select only numeric columns
+numeric_data <- data %>% select(where(is.numeric))
+
+# Compute correlation matrix
+cor_matrix <- cor(numeric_data, use = "complete.obs")
+print(round(cor_matrix, 2))
+
+# Visualize correlation matrix
+corrplot(cor_matrix, method = "color", type = "upper",
+         tl.col = "black", tl.srt = 45, addCoef.col = "black", number.cex = 0.7)
+
+
+
+
+# Run ANOVA tests to check if actual_productivity varies by category
+summary(aov(actual_productivity ~ department, data = data))
+summary(aov(actual_productivity ~ week, data = data))
+summary(aov(actual_productivity ~ day, data = data))
+
+```
+
+**Interpretation:**\
+
+Highly correlated variables like `idle_time` and `idle_men` may introduce multicollinearity. ANOVA tests reveal that categorical variables (e.g., `department`, `day`) significantly influence productivity and are worth including in regression models.
+
+# Linear Regression Model and Assumption Checks
+
+```{r}
+#  Build the OLS model
+Actual_pred_OLS1 <- lm(actual_productivity ~ . - date - quarter, data = data)
+
+#  Show summary
+summary(Actual_pred_OLS1)
+
+#  Diagnostic plots for assumption checking
+#par(mfrow = c(2, 2))  # 2 rows and 2 columns layout
+#plot(Actual_pred_OLS1)
+
+```
+
+Step 1: Split the Data into Two Groups
+
+```{r}
+# Create finishing dataset
+data_finishing <- data %>% filter(department == "finishing")
+
+# Create sewing dataset
+data_sewing <- data %>% filter(department == "sewing")
+
+```
+
+### Step 2: Build Separate OLS Models
+
+For **finishing**:
+
+```{r}
+# OLS model for Finishing Department
+finishing_model <- lm(actual_productivity ~ targeted_productivity + idle_men + no_of_style_change +
+                      smv + no_of_workers + wip + week + days_since_start + over_time + day, 
+                      data = data_finishing)
+
+summary(finishing_model)
+
+```
+
+```{r}
+# Build final clean Finishing model
+finishing_model_clean <- lm(actual_productivity ~ targeted_productivity + smv + no_of_workers +
+                             wip + over_time + week + days_since_start + day, 
+                             data = data_finishing)
+
+summary(finishing_model_clean)
+
+```
+
+For **sewing**:
+
+```{r}
+# OLS model for Sewing Department
+sewing_model <- lm(actual_productivity ~ targeted_productivity + idle_men + no_of_style_change +
+                   smv + no_of_workers + wip + week + days_since_start + over_time + day, 
+                   data = data_sewing)
+
+summary(sewing_model)
+
+```
+
+```{r}
+# --- Sewing Department Clean Model ---
+# This model uses only significant predictors based on earlier full model analysis.
+# Dropped non-significant predictors: week, day of week, over_time, days_since_start.
+
+sewing_model_clean <- lm(actual_productivity ~ targeted_productivity + idle_men + 
+                         no_of_style_change + smv + no_of_workers + wip, 
+                         data = data_sewing)
+
+# Model Interpretation:
+# - Strong predictive power: Expected Adjusted R² ~59%.
+# - Key positive drivers: targeted_productivity (+), no_of_workers (+), wip (+ small).
+# - Key negative drivers: idle_men (-), no_of_style_change (-), smv (-).
+# - Calendar effects (day of week, week) are not significant for sewing.
+# - Productivity primarily depends on operational factors.
+# - Management should focus on reducing idle time, managing style changes, and optimizing team size/task complexity.
+
+# View model summary
+summary(sewing_model_clean)
+```
+
+📊 For **Sewing Model**:
+
+```{r}
+# Residual Diagnostic Plots for Sewing Model
+par(mfrow = c(2, 2))
+plot(sewing_model_clean)
+
+```
+
+📊 For **Finishing Model**:
+
+```{r}
+# Residual Diagnostic Plots for Finishing Model
+par(mfrow = c(2, 2))
+plot(finishing_model_clean)
+
+```
+
+How to Solve Non-Normality – on sewing
+
+## Log or Square Root Transform the Dependent Variable
+
+Use this when residuals are **right-skewed** (as in your Q-Q plot).
+
+```{r}
+# Apply log transformation to the outcome
+data_sewing$log_productivity <- log(data_sewing$actual_productivity + 0.001)  # +0.001 to avoid log(0)
+
+# Refit the model with transformed outcome
+sewing_model_log <- lm(log(data_sewing$actual_productivity + 0.001) ~ targeted_productivity + idle_men + 
+                       no_of_style_change + smv + no_of_workers + wip, 
+                       data = data_sewing)
+
+# Check residuals again
+par(mfrow = c(2, 2))
+plot(sewing_model_log)
+
+```
+
+# Multicollinearity Check
+
+```{r}
+# --- Espinosa-style Condition Index Calculation ---
+
+# Load required package
+library(olsrr)  # Use olsrr for condition index diagnostics
+
+# --- For Sewing Model ---
+cat("\nSewing Model: Condition Index and Variance Decomposition\n")
+ols_coll_diag(sewing_model_clean)
+
+
+# --- For Finishing Model ---
+cat("\nFinishing Model: Condition Index and Variance Decomposition\n")
+ols_coll_diag(finishing_model_clean)
+```
+
+## Conclusion (Espinosa-style):
+
+> Although all VIF values are below 3 and therefore within safe tolerance levels, the condition index (CI = 38.3) combined with elevated variance decomposition proportions for `targeted_productivity`, `smv`, and `no_of_workers` suggests multicollinearity still exists at the **system level**. This situation aligns with Espinosa’s guidance on detecting **hidden collinearity**, where **ridge regression** is recommended over variable deletion to stabilize the model.
+
+```{r}
+# --- Load required packages ---
+library(lmtest)
+
+#To formally confirm, use the Breusch-Pagan Test:
+library(lmtest)
+bptest(sewing_model_log)
+#✅ Breusch-Pagan Test for Finishing Model
+
+
+# Run BP test
+bptest(finishing_model_clean)
+
+
+```
+
+✅ WLS for `data_sewing`
+
+```{r}
+# Step 1: Fit initial log-transformed OLS model
+sewing_model_log <- lm(log(actual_productivity + 0.001) ~ targeted_productivity + idle_men + 
+                       no_of_style_change + smv + no_of_workers + wip, 
+                       data = data_sewing)
+
+# Step 2: Estimate weights from residuals (Espinosa-style)
+aux_model <- lm(abs(residuals(sewing_model_log)) ~ fitted(sewing_model_log))
+data_sewing$wts <- 1 / fitted(aux_model)^2
+
+# Step 3: Refit WLS model using estimated weights
+wls_sewing_log <- lm(log(actual_productivity + 0.001) ~ targeted_productivity + idle_men + 
+                     no_of_style_change + smv + no_of_workers + wip, 
+                     data = data_sewing, weights = wts)
+
+# Step 4: Review model summary
+summary(wls_sewing_log)
+bptest(wls_sewing_log)
+
+
+```
+
+tests for auto correlation
+
+```{r}
+library(lmtest)
+
+# --- Sewing Model (log-transformed) ---
+cat("=== Durbin-Watson Test: Sewing Model ===\n")
+dwtest(sewing_model_log)
+
+# --- Finishing Model ---
+cat("\n=== Durbin-Watson Test: Finishing Model ===\n")
+dwtest(finishing_model_clean)
+
+```
+
+solve for auto correlation
+
+🔹 Step 1: Order data by time (you must define time correctly)
+
+```{r}
+library(dplyr)
+
+# Example: Use 'days_since_start' as time (already numeric)
+data_sewing <- data_sewing %>% arrange(days_since_start)
+data_finishing <- data_finishing %>% arrange(days_since_start)
+
+```
+
+🔹 Step 2: Create lagged outcome variable
+
+```{r}
+# Sewing model: lagged log-productivity
+data_sewing$lag_log_productivity <- dplyr::lag(log(data_sewing$actual_productivity + 0.001), n = 1)
+
+# Finishing model: lagged actual productivity
+data_finishing$lag_productivity <- dplyr::lag(data_finishing$actual_productivity, n = 1)
+
+```
+
+🔹 Step 3: Refit models including lag
+
+```{r}
+# Sewing model with lagged log outcome
+sewing_model_lag <- lm(log(actual_productivity + 0.001) ~ lag_log_productivity +
+                       targeted_productivity + idle_men + no_of_style_change + 
+                       smv + no_of_workers + wip,
+                       data = data_sewing)
+
+# Finishing model with lagged actual productivity
+finishing_model_lag <- lm(actual_productivity ~ lag_productivity +
+                          targeted_productivity + smv + no_of_workers + wip +
+                          over_time + week + days_since_start + day,
+                          data = data_finishing)
+summary(sewing_model_lag)
+summary(finishing_model_lag)
+
+```
+
+🧪 Step 4: Retest for autocorrelation
+
+```{r}
+dwtest(sewing_model_lag)
+dwtest(finishing_model_lag)
+
+```
+
+## 📊 Final Results:
+
+### 🧵 **Sewing Model (with `lag_log_productivity`)**
+
+-   **DW = 1.9299**, **p = 0.1598** → ✅ No evidence of autocorrelation
+
+### 🧵 **Finishing Model (with `lag_productivity`)**
+
+-   **DW = 1.9572**, **p = 0.1647** → ✅ No evidence of autocorrelation
+
+ridge for finishing
+
+```         
+```
+
+🔧 2. **Fit Ridge Model with Cross-Validation**
+
+```{r}
+# Load required package
+library(glmnet)
+
+# Step 1: Remove rows with NAs (from lagging or preprocessing)
+data_ridge <- na.omit(data_finishing)
+
+# Step 2: Build design matrix (X) and response vector (y)
+X <- model.matrix(actual_productivity ~ ., data = data_ridge)[, -1]  # remove intercept
+y <- data_ridge$actual_productivity
+
+# Step 3: Fit Ridge regression using cross-validation (alpha = 0 for Ridge)
+set.seed(123)
+ridge_cv <- cv.glmnet(X, y, alpha = 0, standardize = TRUE, nfolds = 10)
+
+# Step 4: Plot cross-validation error vs lambda
+plot(ridge_cv)
+
+# Step 5: Extract best lambda
+best_lambda <- ridge_cv$lambda.min
+cat("Best lambda:", best_lambda, "\n")
+
+# Step 6: Fit final Ridge model with optimal lambda
+ridge_model <- glmnet(X, y, alpha = 0, lambda = best_lambda, standardize = TRUE)
+
+# Step 7: Show coefficients
+cat("Ridge Coefficients:\n")
+print(coef(ridge_model))
+
+# Step 8: Calculate and report R²
+pred_ridge <- predict(ridge_model, s = best_lambda, newx = X)
+rss <- sum((y - pred_ridge)^2)
+tss <- sum((y - mean(y))^2)
+r2 <- 1 - rss / tss
+cat("R² for Ridge model:", round(r2, 4), "\n")
+
+```
+
+A Ridge regression model was employed to address multicollinearity and heteroskedasticity issues observed in the linear specification. The model selected an optimal lambda of 0.0079 via cross-validation, yielding an R² of 0.4179. Notably, lagged productivity, targeted productivity, weekday effects, and task complexity (SMV) emerged as the most influential predictors. Several redundant or highly collinear variables such as idle metrics and department indicators were effectively penalized to zero."
+
+```         
+```
+
+```{r}
+library(glmnet)
+library(caret)
+library(Metrics)
+
+# --- Data Prep ---
+set.seed(123)
+data_sewing$log_productivity <- log(data_sewing$actual_productivity + 0.001)
+data_sewing_clean <- na.omit(data_sewing)
+
+# Design matrix and response
+x <- model.matrix(log_productivity ~ targeted_productivity + idle_men + 
+                  no_of_style_change + smv + no_of_workers + wip,
+                  data = data_sewing_clean)[, -1]
+y <- data_sewing_clean$log_productivity
+
+# ==== 1. OLS Cross-Validation ====
+ols_cv <- train(
+  log_productivity ~ targeted_productivity + idle_men + no_of_style_change +
+    smv + no_of_workers + wip,
+  data = data_sewing_clean,
+  method = "lm",
+  trControl = trainControl(method = "cv", number = 10)
+)
+
+cat("=== OLS ===\n")
+print(ols_cv)
+
+# ==== 2. WLS Manual Cross-Validation ====
+wls_model <- lm(log_productivity ~ targeted_productivity + idle_men + no_of_style_change +
+                  smv + no_of_workers + wip,
+                data = data_sewing_clean)
+
+wts <- 1 / fitted(lm(abs(residuals(wls_model)) ~ fitted(wls_model)))^2
+folds <- createFolds(y, k = 10)
+wls_rmse <- wls_mae <- wls_r2 <- numeric(10)
+
+for (i in 1:10) {
+  train_idx <- setdiff(1:length(y), folds[[i]])
+  test_idx <- folds[[i]]
+  
+  model <- lm(log_productivity ~ targeted_productivity + idle_men + no_of_style_change +
+                smv + no_of_workers + wip,
+              data = data_sewing_clean[train_idx, ],
+              weights = wts[train_idx])
+  
+  preds <- predict(model, newdata = data_sewing_clean[test_idx, ])
+  obs <- y[test_idx]
+  
+  wls_rmse[i] <- rmse(obs, preds)
+  wls_mae[i] <- mae(obs, preds)
+  wls_r2[i] <- cor(obs, preds)^2
+}
+
+cat("=== WLS ===\n")
+cat("Avg RMSE:", mean(wls_rmse), "\n")
+cat("Avg MAE:", mean(wls_mae), "\n")
+cat("Avg R²:", mean(wls_r2), "\n")
+
+# ==== 3. Ridge (alpha = 0) ====
+cv_ridge <- cv.glmnet(x, y, alpha = 0)
+ridge_pred <- predict(cv_ridge, s = cv_ridge$lambda.min, newx = x)
+cat("=== Ridge ===\n")
+cat("Best λ:", cv_ridge$lambda.min, "\n")
+cat("R²:", round(cor(y, ridge_pred)^2, 4), "\n")
+cat("RMSE:", round(rmse(y, ridge_pred), 4), "\n")
+cat("MAE:", round(mae(y, ridge_pred), 4), "\n")
+
+# ==== 4. LASSO (alpha = 1) ====
+cv_lasso <- cv.glmnet(x, y, alpha = 1)
+lasso_pred <- predict(cv_lasso, s = cv_lasso$lambda.min, newx = x)
+cat("=== LASSO ===\n")
+cat("Best λ:", cv_lasso$lambda.min, "\n")
+cat("R²:", round(cor(y, lasso_pred)^2, 4), "\n")
+cat("RMSE:", round(rmse(y, lasso_pred), 4), "\n")
+cat("MAE:", round(mae(y, lasso_pred), 4), "\n")
+
+# ==== 5. Elastic Net (alpha = 0.5) ====
+cv_enet <- cv.glmnet(x, y, alpha = 0.5)
+enet_pred <- predict(cv_enet, s = cv_enet$lambda.min, newx = x)
+cat("=== Elastic Net ===\n")
+cat("Best λ:", cv_enet$lambda.min, "\n")
+cat("R²:", round(cor(y, enet_pred)^2, 4), "\n")
+cat("RMSE:", round(rmse(y, enet_pred), 4), "\n")
+cat("MAE:", round(mae(y, enet_pred), 4), "\n")
+
+```
+
+### 🧵 **Sewing Model – 10-Fold Cross-Validation Results**
+
+| Model | R² | RMSE | MAE | 🔍 Notes |
+|---------------|---------------|---------------|---------------|---------------|
+| **OLS** | 0.584 | 0.1700 | 0.1021 | Best overall R², simplest model |
+| **WLS** | 0.552 | 0.1754 | 0.1065 | Corrects for heteroskedasticity |
+| **Ridge** | 0.5697 | 0.1709 | 0.1006 | Shrinks coefficients, keeps all vars |
+| **LASSO** | 0.5702 | 0.1703 | 0.1004 | Performs variable selection |
+| **Elastic Net** | 0.5701 | 0.1704 | **0.1002** | Balance of Ridge + LASSO; best MAE |
+
+**Interpretation:**\
+
+The linear regression model provides insights into predictors of productivity. Diagnostic plots check for residual normality, homoscedasticity, and influential observations. VIF values \> 5 or 10 suggest multicollinearity and may require variable reduction.
